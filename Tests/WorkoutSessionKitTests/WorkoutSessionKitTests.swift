@@ -52,6 +52,25 @@ final class WorkoutSessionKitTests: XCTestCase {
     }
 
     @MainActor
+    func testPerSideTimerEmitsSwitchCountdownAndEnd() async {
+        var cues: [SessionCue] = []
+        let engine = WorkoutSessionEngine(
+            totalRounds: 1,
+            slotsForRound: { _ in [WorkoutSlot(id: "a", name: "A", timing: .perSide(secondsEach: 30))] },
+            onCue: { cues.append($0) },
+            sleepNanos: { _ in }   // run the clock instantly
+        )
+        engine.start()
+        await engine.waitForTimerCompletion()
+
+        XCTAssertEqual(engine.phase, .awaitingLog)
+        XCTAssertEqual(cues.filter { $0 == .roundStart }.count, 1)
+        XCTAssertEqual(cues.filter { $0 == .segmentBoundary }.count, 1)  // one side switch
+        XCTAssertEqual(cues.filter { $0 == .slotEnd }.count, 1)
+        XCTAssertEqual(cues.filter { $0 == .countdownTick }.count, 6)    // 3 per side
+    }
+
+    @MainActor
     func testResumeStartsMidSession() {
         let engine = WorkoutSessionEngine(
             totalRounds: 3,

@@ -37,6 +37,8 @@ public final class WorkoutSessionEngine {
     @ObservationIgnored private let onCue: (SessionCue) -> Void
     @ObservationIgnored private let speak: (String) -> Void
     @ObservationIgnored private let countdownLeadSeconds: Int
+    /// Injectable per-tick delay — real time in production, immediate in tests.
+    @ObservationIgnored private let sleepNanos: @Sendable (UInt64) async -> Void
 
     @ObservationIgnored private var timer: Task<Void, Never>?
 
@@ -47,7 +49,8 @@ public final class WorkoutSessionEngine {
         countdownLeadSeconds: Int = 3,
         slotsForRound: @escaping (Int) -> [WorkoutSlot],
         onCue: @escaping (SessionCue) -> Void = { _ in },
-        speak: @escaping (String) -> Void = { _ in }
+        speak: @escaping (String) -> Void = { _ in },
+        sleepNanos: @escaping @Sendable (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) }
     ) {
         self.totalRounds = totalRounds
         self.roundIndex = startingRound
@@ -56,8 +59,12 @@ public final class WorkoutSessionEngine {
         self.slotsForRound = slotsForRound
         self.onCue = onCue
         self.speak = speak
+        self.sleepNanos = sleepNanos
         if roundIndex >= totalRounds { phase = .finished }
     }
+
+    /// Test hook: await the in-flight segment timer to completion.
+    func waitForTimerCompletion() async { await timer?.value }
 
     // MARK: - Derived
 
@@ -109,8 +116,10 @@ public final class WorkoutSessionEngine {
     private func runTimer() {
         stopTimer()
         timer = Task { [weak self] in
-            while let self, !Task.isCancelled, self.secondsRemaining > 0 {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard let self else { return }
+            while !Task.isCancelled, self.secondsRemaining > 0 {
+                await self.sleepNanos(1_000_000_000)
+                if Task.isCancelled { break }
                 self.tick()
             }
         }
