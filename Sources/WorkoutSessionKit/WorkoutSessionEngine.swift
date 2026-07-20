@@ -113,6 +113,13 @@ public final class WorkoutSessionEngine {
         phase = .finished
     }
 
+    /// Dismiss the pending log without recording — return to the slot's idle
+    /// state so it can be re-run. No-op unless awaiting a log.
+    public func returnToIdle() {
+        guard phase == .awaitingLog else { return }
+        phase = .idle
+    }
+
     private func runTimer() {
         stopTimer()
         timer = Task { [weak self] in
