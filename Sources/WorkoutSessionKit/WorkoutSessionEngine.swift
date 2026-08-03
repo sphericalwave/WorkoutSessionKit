@@ -36,6 +36,7 @@ public final class WorkoutSessionEngine {
     @ObservationIgnored private let slotsForRound: (Int) -> [WorkoutSlot]
     @ObservationIgnored private let onCue: (SessionCue) -> Void
     @ObservationIgnored private let speak: (String) -> Void
+    @ObservationIgnored private let announce: (Int) -> String?
     @ObservationIgnored private let countdownLeadSeconds: Int
     /// Injectable per-tick delay — real time in production, immediate in tests.
     @ObservationIgnored private let sleepNanos: @Sendable (UInt64) async -> Void
@@ -50,6 +51,7 @@ public final class WorkoutSessionEngine {
         slotsForRound: @escaping (Int) -> [WorkoutSlot],
         onCue: @escaping (SessionCue) -> Void = { _ in },
         speak: @escaping (String) -> Void = { _ in },
+        announce: @escaping (Int) -> String? = { _ in nil },
         sleepNanos: @escaping @Sendable (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) }
     ) {
         self.totalRounds = totalRounds
@@ -59,6 +61,7 @@ public final class WorkoutSessionEngine {
         self.slotsForRound = slotsForRound
         self.onCue = onCue
         self.speak = speak
+        self.announce = announce
         self.sleepNanos = sleepNanos
         if roundIndex >= totalRounds { phase = .finished }
     }
@@ -142,6 +145,7 @@ public final class WorkoutSessionEngine {
         if secondsRemaining > 0 && secondsRemaining <= countdownLeadSeconds {
             onCue(.countdownTick)
         }
+        if let text = announce(secondsRemaining) { speak(text) }
         if secondsRemaining <= 0 { handleSegmentEnd() }
     }
 
