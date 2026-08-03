@@ -71,6 +71,27 @@ final class WorkoutSessionKitTests: XCTestCase {
     }
 
     @MainActor
+    func testAnnounceFiresAtConfiguredSecondsRemaining() async {
+        var spoken: [String] = []
+        let engine = WorkoutSessionEngine(
+            totalRounds: 1,
+            slotsForRound: { _ in [WorkoutSlot(id: "a", name: "A", timing: .hold(seconds: 5))] },
+            speak: { spoken.append($0) },
+            announce: { remaining in
+                switch remaining {
+                case 3, 2, 1: return "\(remaining)"
+                default: return nil
+                }
+            },
+            sleepNanos: { _ in }
+        )
+        engine.start()
+        await engine.waitForTimerCompletion()
+
+        XCTAssertEqual(spoken, ["A", "3", "2", "1"])
+    }
+
+    @MainActor
     func testResumeStartsMidSession() {
         let engine = WorkoutSessionEngine(
             totalRounds: 3,
