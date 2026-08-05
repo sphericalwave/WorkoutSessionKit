@@ -91,6 +91,67 @@ final class WorkoutSessionKitTests: XCTestCase {
         XCTAssertEqual(spoken, ["A", "3", "2", "1"])
     }
 
+    /// A slot whose timer never ticks, so a test can act on it mid-clock.
+    @MainActor
+    private func heldEngine(seconds: Int) -> WorkoutSessionEngine {
+        WorkoutSessionEngine(
+            totalRounds: 1,
+            slotsForRound: { _ in [WorkoutSlot(id: "a", name: "A", timing: .hold(seconds: seconds))] },
+            sleepNanos: { _ in try? await Task.sleep(nanoseconds: 1_000_000_000_000) }
+        )
+    }
+
+    @MainActor
+    func testResumeSlotPicksUpWhereItLeftOff() {
+        let engine = heldEngine(seconds: 30)
+        engine.start()
+        XCTAssertEqual(engine.phase, .running)
+
+        engine.skipToLog()
+        XCTAssertEqual(engine.phase, .awaitingLog)
+        XCTAssertEqual(engine.secondsRemaining, 30)
+
+        engine.resumeSlot()
+        XCTAssertEqual(engine.phase, .running)
+        XCTAssertEqual(engine.secondsRemaining, 30)   // not restarted, not lost
+        XCTAssertEqual(engine.slotIndex, 0)
+    }
+
+    @MainActor
+    func testResumeSlotIsNoOpAfterNaturalExpiry() async {
+        let engine = WorkoutSessionEngine(
+            totalRounds: 1,
+            slotsForRound: { _ in [WorkoutSlot(id: "a", name: "A", timing: .hold(seconds: 5))] },
+            sleepNanos: { _ in }
+        )
+        engine.start()
+        await engine.waitForTimerCompletion()
+        XCTAssertEqual(engine.phase, .awaitingLog)
+        XCTAssertEqual(engine.secondsRemaining, 0)
+
+        engine.resumeSlot()
+        XCTAssertEqual(engine.phase, .awaitingLog)
+    }
+
+    @MainActor
+    func testResumeSlotIsNoOpOutsideAwaitingLog() {
+        let idle = heldEngine(seconds: 30)
+        idle.resumeSlot()
+        XCTAssertEqual(idle.phase, .idle)
+
+        let running = heldEngine(seconds: 30)
+        running.start()
+        running.resumeSlot()
+        XCTAssertEqual(running.phase, .running)
+        XCTAssertEqual(running.secondsRemaining, 30)
+
+        let cancelled = heldEngine(seconds: 30)
+        cancelled.start()
+        cancelled.cancel()
+        cancelled.resumeSlot()
+        XCTAssertEqual(cancelled.phase, .finished)
+    }
+
     @MainActor
     func testResumeStartsMidSession() {
         let engine = WorkoutSessionEngine(

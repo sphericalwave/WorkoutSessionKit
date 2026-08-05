@@ -123,6 +123,16 @@ public final class WorkoutSessionEngine {
         phase = .idle
     }
 
+    /// Undo a `skipToLog()` — pick the clock back up where it left off rather
+    /// than restarting the segment, for the app whose "done early" button was
+    /// tapped by mistake. No-op unless a log is pending with time still on the
+    /// clock; a slot that ran out on its own has nothing left to resume.
+    public func resumeSlot() {
+        guard phase == .awaitingLog, secondsRemaining > 0 else { return }
+        phase = .running
+        runTimer()
+    }
+
     private func runTimer() {
         stopTimer()
         timer = Task { [weak self] in
