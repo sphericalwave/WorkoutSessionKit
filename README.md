@@ -4,6 +4,14 @@ App-agnostic driver for a rounds x slots workout with per-segment timing (hold /
 per-side / slices). The engine owns the clock, phase, and cue emission; the host app
 owns persistence and progression via the value snapshots it feeds in.
 
+## Components
+
+<!-- SCREENSHOTS:START -->
+| Component | Preview |
+| --- | --- |
+| `InProgressSessionControls` | ![InProgressSessionControls](Docs/img/in-progress-session-controls.png) |
+<!-- SCREENSHOTS:END -->
+
 ## Requirements
 
 - iOS 17+ / macOS 14+
