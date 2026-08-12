@@ -73,3 +73,11 @@ public struct InProgressSessionControls: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("InProgressSessionControls") {
+    Form {
+        InProgressSessionControls(onResume: {}, onComplete: {}, onDiscard: {})
+    }
+}
+#endif
