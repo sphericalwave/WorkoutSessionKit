@@ -17,8 +17,11 @@
 import Foundation
 
 public struct SessionClock: Sendable {
-    let now: @Sendable () -> Date
-    let sleep: @Sendable (UInt64) async -> Void
+    /// Public because a host that supplies a clock has to measure against the
+    /// same one — timing a hold with `Date()` while the engine runs on a
+    /// virtual clock gives two different answers.
+    public let now: @Sendable () -> Date
+    public let sleep: @Sendable (UInt64) async -> Void
 
     public init(
         now: @escaping @Sendable () -> Date,
