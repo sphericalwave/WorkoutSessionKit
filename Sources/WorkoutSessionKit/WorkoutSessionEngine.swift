@@ -30,6 +30,9 @@ public final class WorkoutSessionEngine {
     public private(set) var segmentIndex: Int = 0
     public private(set) var secondsRemaining: Int = 0
     public private(set) var phase: Phase = .idle
+    /// Paused mid-segment. The clock stalls where it is rather than the
+    /// segment restarting, so resuming keeps the seconds that were left.
+    public private(set) var isPaused: Bool = false
 
     /// Slots for a given 0-based round. Called each round so apps can vary the
     /// lineup by round (e.g. a family's live level).
@@ -38,31 +41,74 @@ public final class WorkoutSessionEngine {
     @ObservationIgnored private let speak: (String) -> Void
     @ObservationIgnored private let announce: (Int) -> String?
     @ObservationIgnored private let countdownLeadSeconds: Int
-    /// Injectable per-tick delay — real time in production, immediate in tests.
-    @ObservationIgnored private let sleepNanos: @Sendable (UInt64) async -> Void
+    /// Run the whole session unattended, without stopping for a log between
+    /// slots. For a guided routine that records itself — a meditation has no
+    /// log sheet to pause for.
+    @ObservationIgnored public let autoAdvance: Bool
+    @ObservationIgnored private let clock: SessionClock
 
     @ObservationIgnored private var timer: Task<Void, Never>?
+    /// Wall-clock accounting for the segment in progress, less time paused.
+    @ObservationIgnored private var segmentStart: Date?
+    @ObservationIgnored private var pausedAt: Date?
+    @ObservationIgnored private var pausedTotal: TimeInterval = 0
+
+    /// How often the clock is sampled. Finer than a second so a pause or a
+    /// finish lands promptly, while whole-second effects still fire once each.
+    private static let tickNanos: UInt64 = 100_000_000
 
     public init(
         totalRounds: Int,
         startingRound: Int = 0,
         startingSlot: Int = 0,
         countdownLeadSeconds: Int = 3,
+        autoAdvance: Bool = false,
         slotsForRound: @escaping (Int) -> [WorkoutSlot],
         onCue: @escaping (SessionCue) -> Void = { _ in },
         speak: @escaping (String) -> Void = { _ in },
         announce: @escaping (Int) -> String? = { _ in nil },
-        sleepNanos: @escaping @Sendable (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) }
+        sleepNanos: (@Sendable (UInt64) async -> Void)? = nil
     ) {
         self.totalRounds = totalRounds
         self.roundIndex = startingRound
         self.slotIndex = startingSlot
         self.countdownLeadSeconds = countdownLeadSeconds
+        self.autoAdvance = autoAdvance
         self.slotsForRound = slotsForRound
         self.onCue = onCue
         self.speak = speak
         self.announce = announce
-        self.sleepNanos = sleepNanos
+        // Supplying a sleep is the test seam: time then advances by exactly
+        // what was asked for, so a session runs to completion instantly and
+        // deterministically. Production takes real time.
+        self.clock = sleepNanos.map { SessionClock.virtual(sleep: $0) } ?? .realtime
+        if roundIndex >= totalRounds { phase = .finished }
+    }
+
+    /// For a host supplying its own clock — a preview driving the countdown
+    /// by hand, say. Most callers want the initialiser above.
+    public init(
+        totalRounds: Int,
+        startingRound: Int = 0,
+        startingSlot: Int = 0,
+        countdownLeadSeconds: Int = 3,
+        autoAdvance: Bool = false,
+        clock: SessionClock,
+        slotsForRound: @escaping (Int) -> [WorkoutSlot],
+        onCue: @escaping (SessionCue) -> Void = { _ in },
+        speak: @escaping (String) -> Void = { _ in },
+        announce: @escaping (Int) -> String? = { _ in nil }
+    ) {
+        self.totalRounds = totalRounds
+        self.roundIndex = startingRound
+        self.slotIndex = startingSlot
+        self.countdownLeadSeconds = countdownLeadSeconds
+        self.autoAdvance = autoAdvance
+        self.slotsForRound = slotsForRound
+        self.onCue = onCue
+        self.speak = speak
+        self.announce = announce
+        self.clock = clock
         if roundIndex >= totalRounds { phase = .finished }
     }
 
@@ -80,14 +126,9 @@ public final class WorkoutSessionEngine {
     public var isFinalRound: Bool { roundIndex == totalRounds - 1 }
 
     /// Human label for the current segment ("Left"/"Right" per-side, "Slice n"
-    /// for slices, "" for a single hold).
+    /// for slices, the given name for named segments, "" for a single hold).
     public var segmentLabel: String {
-        guard let timing = currentSlot?.timing else { return "" }
-        switch timing {
-        case .hold:    return ""
-        case .perSide: return segmentIndex == 0 ? "Left" : "Right"
-        case .slices:  return "Slice \(segmentIndex + 1)"
-        }
+        currentSlot?.timing.label(forSegment: segmentIndex) ?? ""
     }
 
     // MARK: - Run
@@ -98,10 +139,32 @@ public final class WorkoutSessionEngine {
         guard let slot = currentSlot else { return }
         phase = .running
         segmentIndex = 0
-        secondsRemaining = slot.timing.seconds(forSegment: 0)
+        beginSegment(seconds: slot.timing.seconds(forSegment: 0))
         if slotIndex == 0 { onCue(.roundStart) }
         announce(slot)
         runTimer()
+    }
+
+    private func beginSegment(seconds: Int) {
+        secondsRemaining = seconds
+        segmentStart = clock.now()
+        pausedAt = nil
+        pausedTotal = 0
+    }
+
+    /// Stall the clock. The segment keeps its remaining seconds; nothing is
+    /// lost and nothing is restarted.
+    public func pause() {
+        guard phase == .running, !isPaused else { return }
+        isPaused = true
+        pausedAt = clock.now()
+    }
+
+    public func resume() {
+        guard isPaused else { return }
+        if let pausedAt { pausedTotal += clock.now().timeIntervalSince(pausedAt) }
+        pausedAt = nil
+        isPaused = false
     }
 
     /// Skip the remaining clock and go straight to logging.
@@ -130,7 +193,19 @@ public final class WorkoutSessionEngine {
     public func resumeSlot() {
         guard phase == .awaitingLog, secondsRemaining > 0 else { return }
         phase = .running
+        // However long the log sheet was up, it isn't hold time — re-peg the
+        // clock so the seconds left are the ones the user saw.
+        reanchorSegment()
         runTimer()
+    }
+
+    /// Re-peg the segment's start so `secondsRemaining` survives a gap the
+    /// clock shouldn't have counted.
+    private func reanchorSegment() {
+        let consumed = TimeInterval(currentSegmentSeconds - secondsRemaining)
+        segmentStart = clock.now().addingTimeInterval(-consumed)
+        pausedAt = nil
+        pausedTotal = 0
     }
 
     private func runTimer() {
@@ -138,7 +213,7 @@ public final class WorkoutSessionEngine {
         timer = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled, self.secondsRemaining > 0 {
-                await self.sleepNanos(1_000_000_000)
+                await self.clock.sleep(Self.tickNanos)
                 if Task.isCancelled { break }
                 self.tick()
             }
@@ -150,13 +225,26 @@ public final class WorkoutSessionEngine {
         timer = nil
     }
 
+    /// Recomputes what's left from elapsed wall time rather than counting
+    /// down, so the segment can't drift past its target however the sleeps
+    /// land. Whole-second effects fire only when the displayed second
+    /// changes, since this runs several times a second.
     private func tick() {
-        secondsRemaining -= 1
-        if secondsRemaining > 0 && secondsRemaining <= countdownLeadSeconds {
-            onCue(.countdownTick)
-        }
-        if let text = announce(secondsRemaining) { speak(text) }
-        if secondsRemaining <= 0 { handleSegmentEnd() }
+        guard !isPaused, let start = segmentStart else { return }
+        let total = secondsRemaining
+        let elapsed = clock.now().timeIntervalSince(start) - pausedTotal
+        let target = TimeInterval(currentSegmentSeconds)
+        let left = max(0, Int((target - elapsed).rounded(.up)))
+        guard left != total else { return }
+
+        secondsRemaining = left
+        if left > 0 && left <= countdownLeadSeconds { onCue(.countdownTick) }
+        if let text = announce(left) { speak(text) }
+        if left <= 0 { handleSegmentEnd() }
+    }
+
+    private var currentSegmentSeconds: Int {
+        currentSlot?.timing.seconds(forSegment: segmentIndex) ?? 0
     }
 
     private func handleSegmentEnd() {
@@ -164,13 +252,20 @@ public final class WorkoutSessionEngine {
         let next = segmentIndex + 1
         if next < slot.timing.segmentCount {
             segmentIndex = next
-            secondsRemaining = slot.timing.seconds(forSegment: next)
+            beginSegment(seconds: slot.timing.seconds(forSegment: next))
             onCue(.segmentBoundary)
             announce(slot)
         } else {
             stopTimer()
             onCue(.slotEnd)
-            phase = .awaitingLog
+            // Unattended: record nothing, just roll straight into whatever
+            // comes next. The host reads the completed slot from its cues.
+            if autoAdvance {
+                advance()
+                if phase == .idle { startSlot() }
+            } else {
+                phase = .awaitingLog
+            }
         }
     }
 

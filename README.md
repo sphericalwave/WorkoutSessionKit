@@ -33,9 +33,27 @@ owns persistence and progression via the value snapshots it feeds in.
   // ...app persists the set + applies progression...
   engine.advance()                      // -> next slot / round / finished
   ```
+  Or unattended, for a guided routine that records itself and has no log
+  sheet to stop at:
+  ```swift
+  let engine = WorkoutSessionEngine(
+      totalRounds: 3,
+      autoAdvance: true,                // slot -> slot -> round -> finished
+      slotsForRound: { _ in postures },
+      speak: { audio.speak($0) }
+  )
+  engine.start()
+  ```
 - `WorkoutSlot` — a value snapshot of the exercise to perform in one slot of a round; apps build these from their own model types, the engine never sees SwiftData/CoreData
-- `TimingMode` — hold / per-side / slices timing configuration for a slot
+- `TimingMode` — hold / per-side / slices / named-segment timing for a slot.
+  `.segments(names: ["Right", "Centre", "Left"], seconds: 60)` runs one hold
+  per name, announced by name — for a posture a left/right pair can't express
 - `SessionCue` — cues emitted by the engine (segment boundary, slot end, etc.)
+- `SessionClock` — where the engine gets time. `.realtime` in an app, or the
+  `sleepNanos:` seam to run a whole session instantly in a test. What's left
+  of a segment is derived from elapsed time rather than decremented once per
+  sleep, so a long hold can't drift past its target
+- `pause()` / `resume()` — stall a segment without losing the seconds left
 - `InProgressSessionControls` — SwiftUI controls for an in-progress session
 
 ## Dependencies
